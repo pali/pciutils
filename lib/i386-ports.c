@@ -32,6 +32,8 @@
 #error Do not know how to access I/O ports on this OS.
 #endif
 
+#include "i386-cpuid.h"
+
 static int conf12_io_enabled = -1;		/* -1=haven't tried, 0=failed, 1=succeeded */
 
 static int
@@ -46,7 +48,10 @@ static void
 conf12_init(struct pci_access *a)
 {
   if (!conf12_setup_io(a))
+  {
+    a->debug("\n");
     a->error("No permission to access I/O ports (you probably have to be root).");
+  }
 }
 
 static void
@@ -99,8 +104,6 @@ intel_sanity_check(struct pci_access *a, struct pci_methods *m)
  *	Configuration type 1
  */
 
-#define CONFIG_CMD(bus, device_fn, where)   (0x80000000 | (bus << 16) | (device_fn << 8) | (where & ~3))
-
 static int
 conf1_detect(struct pci_access *a)
 {
@@ -128,19 +131,19 @@ conf1_detect(struct pci_access *a)
 }
 
 static int
-conf1_read(struct pci_dev *d, int pos, byte *buf, int len)
+conf1_ext_read(struct pci_dev *d, int pos, byte *buf, int len)
 {
   int addr = 0xcfc + (pos&3);
   int res = 1;
 
-  if (d->domain || pos >= 256)
+  if (d->domain || pos >= 4096)
     return 0;
 
   if (len != 1 && len != 2 && len != 4)
     return pci_generic_block_read(d, pos, buf, len);
 
   intel_io_lock();
-  outl(0x80000000 | ((d->bus & 0xff) << 16) | (PCI_DEVFN(d->dev, d->func) << 8) | (pos&~3), 0xcf8);
+  outl(0x80000000 | ((pos & 0xf00) << 16) | ((d->bus & 0xff) << 16) | (PCI_DEVFN(d->dev, d->func) << 8) | (pos & 0xfc), 0xcf8);
 
   switch (len)
     {
@@ -160,19 +163,28 @@ conf1_read(struct pci_dev *d, int pos, byte *buf, int len)
 }
 
 static int
-conf1_write(struct pci_dev *d, int pos, byte *buf, int len)
+conf1_read(struct pci_dev *d, int pos, byte *buf, int len)
+{
+  if (pos >= 256)
+    return 0;
+
+  return conf1_ext_read(d, pos, buf, len);
+}
+
+static int
+conf1_ext_write(struct pci_dev *d, int pos, byte *buf, int len)
 {
   int addr = 0xcfc + (pos&3);
   int res = 1;
 
-  if (d->domain || pos >= 256)
+  if (d->domain || pos >= 4096)
     return 0;
 
   if (len != 1 && len != 2 && len != 4)
     return pci_generic_block_write(d, pos, buf, len);
 
   intel_io_lock();
-  outl(0x80000000 | ((d->bus & 0xff) << 16) | (PCI_DEVFN(d->dev, d->func) << 8) | (pos&~3), 0xcf8);
+  outl(0x80000000 | ((pos & 0xf00) << 16) | ((d->bus & 0xff) << 16) | (PCI_DEVFN(d->dev, d->func) << 8) | (pos & 0xfc), 0xcf8);
 
   switch (len)
     {
@@ -188,6 +200,15 @@ conf1_write(struct pci_dev *d, int pos, byte *buf, int len)
     }
   intel_io_unlock();
   return res;
+}
+
+static int
+conf1_write(struct pci_dev *d, int pos, byte *buf, int len)
+{
+  if (pos >= 256)
+    return 0;
+
+  return conf1_ext_write(d, pos, buf, len);
 }
 
 /*
@@ -290,6 +311,199 @@ conf2_write(struct pci_dev *d, int pos, byte *buf, int len)
   return res;
 }
 
+static int cpu_detected = -1;
+static int cpu_needs_setup = 0;
+static int
+conf1_ext_detect_cpu(struct pci_access *a)
+{
+#ifdef __get_cpuid
+  unsigned int eax, ebx, ecx, edx;
+  unsigned int family;
+#endif
+
+  if (cpu_detected >= 0)
+    goto out;
+
+#ifndef __get_cpuid
+  a->debug("...cannot determinate CPU model");
+  cpu_detected = 0;
+  goto out;
+#else
+  if (!__get_cpuid(0, &eax, &ebx, &ecx, &edx))
+    {
+      a->debug("...detected unsupported CPU without cpuid instruction");
+      cpu_detected = 0;
+      goto out;
+    }
+
+  /* Check for AuthenticAMD or HygonGenuine signature. */
+  if ((ebx != 0x68747541 || edx != 0x69746E65 || ecx != 0x444D4163) &&
+      (ebx != 0x6f677948 || edx != 0x6e65476e || ecx != 0x656e6975))
+    {
+      a->debug("...detected unsupported CPU %.4s%.4s%.4s", (char *)&ebx, (char *)&edx, (char *)&ecx);
+      cpu_detected = 0;
+      goto out;
+    }
+
+  /* Get the CPU family number. */
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx))
+    {
+      a->debug("...detected unsupported CPU AMD/Hygon");
+      cpu_detected = 0;
+      goto out;
+    }
+  family = (eax >> 8) & 0xf;
+  if (family == 0xf)
+    family += (eax >> 20) & 0xff;
+
+  /* For now only AMD Family 10h and higher CPUs are supported. */
+  if (family < 0x10)
+    {
+      a->debug("...detected unsupported CPU AMD Family %xh", family);
+      cpu_detected = 0;
+      goto out;
+    }
+
+  /* AMD Family 10h - 16h needs special setup. */
+  if (family < 0x17)
+    cpu_needs_setup = 1;
+
+  a->debug("...detected supported CPU AMD Family %xh", family);
+  cpu_detected = 1;
+  goto out;
+#endif
+
+out:
+  return cpu_detected;
+}
+
+static int
+conf1_ext_setup(struct pci_access *a)
+{
+  struct pci_dev d;
+  u32 nbcfg1;
+  u32 val;
+
+  /*
+   * AMD Family 10h - 16h:
+   * EnableCf8ExtCfg bit [46] in NB Configuration 1 [NB_CFG1] register controls
+   * whether CF8 extended configuration cycles are enabled or not. This 64-bit
+   * register is mapped to MSR register [MSRC001_001F] and its upper 32 bits
+   * also to PCI register [D18F3x8C]. That PCI register is in config space of
+   * bus 0x00 device 0x18 function 0x3 offset 0x8c.
+   * AMD Family 17h+:
+   * No special setup is required, ExtRegNo is always enabled and supported.
+   * References:
+   * BIOS and Kernel Developer’s Guide (BKDG) For AMD Family 10h-16h Processors
+   * Processor Programming Reference (PPR) for AMD Family 17h-19h Processors
+   * https://developer.amd.com/resources/developer-guides-manuals/
+   */
+
+  if (!cpu_needs_setup)
+    {
+      a->debug("...no setup required");
+      goto verify;
+    }
+
+  memset(&d, 0, sizeof(d));
+  d.bus = 0;
+  d.dev = 0x18;
+  d.func = 0x3;
+
+  a->debug("...reading NB_CFG1");
+  if (!conf1_read(&d, 0x8c, (byte *)&nbcfg1, sizeof(nbcfg1)))
+    {
+      a->debug("...failed");
+      return 0;
+    }
+
+  if (!(nbcfg1 & (1 << (46 - 32))))
+    {
+      a->debug("...EnableCf8ExtCfg unset");
+      nbcfg1 |= (1 << (46 - 32));
+      a->debug("...setting EnableCf8ExtCfg in NB_CFG1");
+      if (!conf1_write(&d, 0x8c, (byte *)&nbcfg1, sizeof(nbcfg1)))
+        {
+          a->debug("...failed");
+          return 0;
+        }
+      a->debug("...reading NB_CFG1");
+      if (!conf1_read(&d, 0x8c, (byte *)&nbcfg1, sizeof(nbcfg1)))
+        {
+          a->debug("...failed");
+          return 0;
+        }
+      a->debug("...verifying EnableCf8ExtCfg");
+      if (!(nbcfg1 & (1 << (46 - 32))))
+        {
+          a->debug("...failed");
+          return 0;
+        }
+      a->debug("...passed");
+    }
+  else
+    a->debug("...EnableCf8ExtCfg already set");
+
+verify:
+  /*
+   * Set CF8 address to the first register from extended config space (0x100)
+   * and verify that address was set the correct value. When Cf8ExtCfg access
+   * is unsupported or not enabled then CF8 address bits for extended config
+   * space cannot be set and are hardwired to zeros.
+   */
+  a->debug("...verifying Cf8ExtCfg access");
+  intel_io_lock();
+  outl(0x81000000, 0xcf8);
+  val = inl(0xcf8);
+  intel_io_unlock();
+  if (val != 0x81000000)
+    {
+      a->debug("...failed");
+      return 0;
+    }
+  a->debug("...passed");
+
+  return 1;
+}
+
+static void
+conf1_ext_init(struct pci_access *a)
+{
+  if (cpu_detected < 0)
+    {
+      a->debug("detecting CPU");
+      conf1_ext_detect_cpu(a);
+    }
+  if (!cpu_detected)
+    {
+      a->debug("\n");
+      a->error("Unsupported CPU for Intel conf1 extended interface (requires AMD Family 10h or higher).");
+    }
+
+  conf12_init(a);
+
+  if (!conf1_ext_setup(a))
+    {
+      a->debug("\n");
+      a->error("Cannot setup Intel conf1 extended interface (probably not supported).");
+    }
+}
+
+static int
+conf1_ext_detect(struct pci_access *a)
+{
+  if (!conf1_ext_detect_cpu(a))
+    return 0;
+
+  if (!conf1_detect(a))
+    return 0;
+
+  if (!conf1_ext_setup(a))
+    return 0;
+
+  return 1;
+}
+
 struct pci_methods pm_intel_conf1 = {
   "intel-conf1",
   "Raw I/O port access using Intel conf1 interface",
@@ -301,6 +515,22 @@ struct pci_methods pm_intel_conf1 = {
   pci_generic_fill_info,
   conf1_read,
   conf1_write,
+  NULL,					/* read_vpd */
+  NULL,					/* init_dev */
+  NULL					/* cleanup_dev */
+};
+
+struct pci_methods pm_intel_conf1_ext = {
+  "intel-conf1-ext",
+  "Raw I/O port access using Intel conf1 extended interface",
+  NULL,					/* config */
+  conf1_ext_detect,
+  conf1_ext_init,
+  conf12_cleanup,
+  pci_generic_scan,
+  pci_generic_fill_info,
+  conf1_ext_read,
+  conf1_ext_write,
   NULL,					/* read_vpd */
   NULL,					/* init_dev */
   NULL					/* cleanup_dev */

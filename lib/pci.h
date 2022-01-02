@@ -49,6 +49,7 @@ enum pci_access_type {
   PCI_ACCESS_MMIO_TYPE1,		/* MMIO ports, type 1 */
   PCI_ACCESS_MMIO_TYPE1_EXT,		/* MMIO ports, type 1 extended */
   PCI_ACCESS_ECAM,			/* PCIe ECAM via /dev/mem */
+  PCI_ACCESS_I386_TYPE1_EXT,		/* i386 ports, type 1 extended */
   PCI_ACCESS_MAX
 };
 

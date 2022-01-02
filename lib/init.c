@@ -156,6 +156,11 @@ static struct pci_methods *pci_methods[PCI_ACCESS_MAX] = {
 #else
   NULL,
 #endif
+#ifdef PCI_HAVE_PM_INTEL_CONF
+  &pm_intel_conf1_ext,
+#else
+  NULL,
+#endif
 };
 
 // If PCI_ACCESS_AUTO is selected, we probe the access methods in this order
@@ -175,6 +180,7 @@ static int probe_sequence[] = {
   PCI_ACCESS_WIN32_SYSDBG,
   // Low-level methods poking the hardware directly
   PCI_ACCESS_ECAM,
+  PCI_ACCESS_I386_TYPE1_EXT,
   PCI_ACCESS_I386_TYPE1,
   PCI_ACCESS_I386_TYPE2,
   PCI_ACCESS_MMIO_TYPE1_EXT,

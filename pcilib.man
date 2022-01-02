@@ -34,6 +34,10 @@ to all users, the rest only to root.
 Direct hardware access via Intel configuration mechanism 1. Available on i386 and compatibles
 on Linux, Solaris/x86, GNU Hurd, Windows, BeOS and Haiku. Requires root privileges.
 .TP
+.B intel-conf1-ext
+Direct hardware access via Extended PCIe Intel configuration mechanism 1. Available on
+AMD Family 10h and higher CPUs. Requires root privileges.
+.TP
 .B intel-conf2
 Direct hardware access via Intel configuration mechanism 2. Available on i386 and compatibles
 on Linux, Solaris/x86, GNU Hurd, Windows, BeOS and Haiku. Requires root privileges. Warning: This method
