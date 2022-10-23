@@ -122,6 +122,22 @@ Archived download links of previous WinDbg versions:
 https://web.archive.org/web/20110221133326/https://www.microsoft.com/whdc/devtools/debugging/installx86.mspx
 .br
 https://web.archive.org/web/20110214012715/https://www.microsoft.com/whdc/devtools/debugging/install64bit.mspx
+.TP
+.B win32-dspcicfg
+Access to the PCI configuration space via DsPciCfg kernel driver (dspcicfg.sys).
+This driver is not part of Windows system but is part of the Windows 2000 DDK
+and also is part of Compaq PCI Configuration Utility (PCITOOL V1.32). Available
+only for 32-bit x86 and Alpha systems. Driver does not require any special
+privileges but allows access only to PCI devices from the first PCI domain.
+On recent Windows versions after installation it is needed to register driver
+manually via sc command:
+.B sc create DsPciCfg DisplayName= DsPciCfg binPath= \e??\e%SystemRoot%\esystem32\edrivers\eDsPciCfg.SYS type= kernel start= auto
+.IP
+Archived download and homepage links:
+.br
+https://web.archive.org/web/20010413162553/http://www.microsoft.com/ddk/installW2k.asp
+.br
+https://web.archive.org/web/20150403034433/http://www.compaq.com/support/files/alphant/drivers/index.html
 
 .SH PARAMETERS
 
